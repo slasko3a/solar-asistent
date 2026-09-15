@@ -1,0 +1,2 @@
+# solar-asistent
+NGEN optimizer

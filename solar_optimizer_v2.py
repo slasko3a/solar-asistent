@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # Osnovna konfiguracija strani
 st.set_page_config(page_title="NGEN Nadzornik Špic v2", layout="centered", page_icon="☀️")
@@ -20,41 +21,33 @@ MAX_BATTERY_CHARGE_KW = 5.5  # Realna polnilna moč baterije
 LATITUDE = 46.52             # Razkrižje
 LONGITUDE = 16.20
 
-# Sezonska umeritev glede na vpadni kot sonca na 35° in temperature celic
 MONTHLY_FACTORS = {
-    1: 1.00,   # Jan
-    2: 1.04,   # Feb
-    3: 1.12,   # Mar (idealen kot, hladen zrak)
-    4: 1.12,   # Apr
-    5: 1.06,   # Maj
-    6: 1.00,   # Jun (visoko sonce, vroče celice)
-    7: 0.98,   # Jul (pregrevanje modulov)
-    8: 1.03,   # Avg
-    9: 1.09,   # Sep (idealen vpadni kot za 35°)
-    10: 1.08,  # Okt
-    11: 1.02,  # Nov
-    12: 1.00   # Dec
+    1: 1.00, 2: 1.04, 3: 1.12, 4: 1.12, 5: 1.06,
+    6: 1.00, 7: 0.98, 8: 1.03, 9: 1.09, 10: 1.08,
+    11: 1.02, 12: 1.00
 }
 
-current_month = datetime.now().month
+# Čas v Sloveniji (neodvisno od lokacije Streamlit strežnika)
+slo_tz = ZoneInfo("Europe/Ljubljana")
+now_slo = datetime.now(slo_tz)
+current_month = now_slo.month
 CALIBRATION_BOOST = MONTHLY_FACTORS.get(current_month, 1.05)
 
 st.title("☀️ NGEN Nadzornik Špic v2")
-st.caption(f"v2.7: Mesečno umerjanje aktivno (Mesec: {current_month}, Faktor: {CALIBRATION_BOOST:.2f})")
+st.caption(f"v2.8: Natančna minutaža polnosti baterije (Mesec: {current_month}, Umeritev: {CALIBRATION_BOOST:.2f})")
 
-# 2. Vnos stanja in časovna točka
+# 2. Vnos stanja
 st.subheader("1. Trenutno stanje")
 
-now = datetime.now()
 col_time1, col_time2 = st.columns(2)
 with col_time1:
-    sim_time = st.time_input("Ura vnosa podatkov:", value=now.time())
+    sim_time = st.time_input("Ura vnosa podatkov (lokalni čas):", value=now_slo.time())
     calc_hour = sim_time.hour
     calc_minute = sim_time.minute
     start_time_float = calc_hour + (calc_minute / 60.0)
 
 with col_time2:
-    st.info(f"⏱️ Analiza velja za preostanek dneva: **od {calc_hour:02d}:{calc_minute:02d} do večera**.")
+    st.info(f"⏱️ Analiza velja od **{calc_hour:02d}:{calc_minute:02d}** do sončnega zahoda.")
 
 col1, col2 = st.columns(2)
 
@@ -75,7 +68,7 @@ with col2:
     else:
         ev_cap, soc_ev, ev_power, ev_room = 77.0, 100, 6.0, 0.0
 
-# 3. Vremenski model (Open-Meteo GTI)
+# 3. Vremenski model
 @st.cache_data(ttl=1800)
 def fetch_weather(lat, lon, tilt, azimuth):
     url = (
@@ -101,30 +94,47 @@ for h in range(24):
     kw = min(INVERTER_MAX_KW, (rad / 1000.0) * PV_PEAK_KW * eff)
     pv_curve.append(round(max(0.0, kw), 2))
 
-# Osnovna hišna poraba (z vključeno sanitarno TČ)
 base_load = [0.8 if 10 <= h <= 16 else 0.4 for h in range(24)]
 
-# 4. Simulacija privzetega načina (Hiša -> Baterija -> Omrežje)
+# 4. Natančna minutna simulacija polnjenja in prepoznave špic
 curr_kwh = BATTERY_CAPACITY_KWH * (soc_home / 100.0)
-full_hour_float = None
-spike_detected = False
-spike_hours = []
+battery_full_time_float = None
+spike_start_float = None
+spike_end_float = None
 
-for h in range(calc_hour, 24):
-    h_frac = (60 - calc_minute) / 60.0 if h == calc_hour else 1.0
-    surplus_p = max(0.0, pv_curve[h] - base_load[h])
-    room = (BATTERY_CAPACITY_KWH - curr_kwh) / BATTERY_EFFICIENCY
-    
-    charge_p = min(surplus_p, MAX_BATTERY_CHARGE_KW, room / h_frac)
-    curr_kwh += charge_p * h_frac * BATTERY_EFFICIENCY
-    
-    if curr_kwh >= (BATTERY_CAPACITY_KWH * 0.99) and full_hour_float is None:
-        full_hour_float = h + (1.0 - h_frac)
-        
-    export_p = surplus_p - charge_p
+# Simulacija po 5-minutnih korakih od trenutnega časa naprej
+step_hours = 5.0 / 60.0
+sim_t = start_time_float
+
+while sim_t < 21.0:
+    h_idx = min(23, int(sim_t))
+    solar_p = pv_curve[h_idx]
+    load_p = base_load[h_idx]
+    surplus_p = max(0.0, solar_p - load_p)
+
+    room_kwh = (BATTERY_CAPACITY_KWH - curr_kwh) / BATTERY_EFFICIENCY
+
+    if room_kwh > 0.05:
+        # Baterija se polni
+        charge_p = min(surplus_p, MAX_BATTERY_CHARGE_KW)
+        curr_kwh += charge_p * step_hours * BATTERY_EFFICIENCY
+        export_p = surplus_p - charge_p
+    else:
+        # Baterija je 100 % polna
+        if battery_full_time_float is None:
+            battery_full_time_float = sim_t
+        charge_p = 0.0
+        export_p = surplus_p
+
+    # Preverjanje presežka nad varnostno mejo
     if export_p > GRID_SAFE_LIMIT_KW:
-        spike_detected = True
-        spike_hours.append(h)
+        if spike_start_float is None:
+            spike_start_float = sim_t
+        spike_end_float = sim_t + step_hours
+
+    sim_t += step_hours
+
+spike_detected = (spike_start_float is not None)
 
 # 5. Odločitev in priporočilo
 st.markdown("---")
@@ -132,37 +142,51 @@ st.subheader("2. Stanje varnosti in navodila")
 
 if not spike_detected:
     st.success("### ✅ VSE JE VARNO – Ohranite profil: **Hiša ➔ BATERIJA ➔ Omrežje**")
+    full_info = ""
+    if battery_full_time_float:
+        bf_h = int(battery_full_time_float)
+        bf_m = int((battery_full_time_float % 1) * 60)
+        full_info = f" (100 % bo dosegla okrog **{bf_h:02d}:{bf_m:02d}**)"
+    
     st.markdown(f"""
-    * **Brez tveganja za prenapetost:** Baterija sama zanesljivo blaži oddajo. Tudi če/ko bo dosegla 100 %, oddaja v omrežje ne bo presegla 8,9 kW.
-    * **Predvideno končno stanje:** NGEN baterija bo do večera dosegla **{min(100.0, (curr_kwh / BATTERY_CAPACITY_KWH) * 100):.0f} %**.
-    * **Avtomobil:** Polnjenje podnevi ni potrebno. Polnite ga ponoči po 22:00 v cenejšem bloku.
+    * **Brez nevarnosti za izpad:** Baterija sama posrka viške{full_info}. Tudi ko bo polna, proizvodnja sonca ne bo presegla varne meje 8,9 kW.
+    * **Predvideno stanje ob sončnem zahodu:** **{min(100.0, (curr_kwh / BATTERY_CAPACITY_KWH) * 100):.0f} %**.
+    * **Avtomobil:** Polnjenje podnevi ni potrebno. Polnite ga ponoči v cenejši tarifi.
     """)
 else:
-    first_spike = min(spike_hours)
-    last_spike = max(spike_hours) + 1
-    st.error(f"### ⚠️ NEVARNOST PREKORATITVE med {first_spike}:00 in {last_spike}:00!")
-    st.markdown(f"""
-    * Baterija se bo napolnila okoli **{int(full_hour_float):02d}:{int((full_hour_float % 1) * 60):02d}**, medtem ko bo sonce še presegalo mejo oddaje.
-    """)
+    sp_s_h = int(spike_start_float)
+    sp_s_m = int((spike_start_float % 1) * 60)
+    sp_e_h = int(spike_end_float)
+    sp_e_m = int((spike_end_float % 1) * 60)
     
-    if ev_present and ev_room > 3.0:
-        ev_dur = min(ev_room / ev_power, float(len(spike_hours)))
-        ev_start = first_spike
-        ev_end = ev_start + ev_dur
+    st.error(f"### ⚠️ NEVARNOST PREKORAČITVE med {sp_s_h:02d}:{sp_s_m:02d} in {sp_e_h:02d}:{sp_e_m:02d}!")
+    
+    if battery_full_time_float and battery_full_time_float <= spike_start_float + 0.1:
+        bf_h = int(battery_full_time_float)
+        bf_m = int((battery_full_time_float % 1) * 60)
+        st.markdown(f"* Baterija bo dosegla 100 % ob **{bf_h:02d}:{bf_m:02d}**. Ker bo sonce takrat še presegalo 8,9 kW, bo takoj po napolnitvi presežek udaril v omrežje.")
+    else:
+        st.markdown(f"* Sončna proizvodnja med {sp_s_h:02d}:{sp_s_m:02d} in {sp_e_h:02d}:{sp_e_m:02d} presega vsoto porabe in polnjenja baterije.")
+
+    if ev_present and ev_room > 2.0:
+        ev_dur = min(ev_room / ev_power, max(0.5, spike_end_float - spike_start_float))
+        ev_end = spike_start_float + ev_dur
+        ee_h = int(ev_end)
+        ee_m = int((ev_end % 1) * 60)
         st.markdown(f"""
-        **Možnost A (Najboljša - Polnjenje EV):**
-        * Profil pustite na privzetem: **Hiša ➔ Baterija ➔ Omrežje**.
-        * Vklopite polnjenje avta med **{int(ev_start):02d}:00 in {int(ev_end):02d}:{int((ev_dur % 1) * 60):02d}** ({ev_power} kW).
-        * Avto bo porezal točno sončno špico, NGEN baterija pa bo ob mraku še vedno polna.
+        **Možnost A (Priporočeno - Vklop EV):**
+        * Profil pustite na: **Hiša ➔ Baterija ➔ Omrežje**.
+        * Vklopite polnjenje avtomobila med **{sp_s_h:02d}:{sp_s_m:02d} in {ee_h:02d}:{ee_m:02d}** ({ev_power} kW).
+        * Avto bo porezal špico, baterija pa bo ob mraku še vedno polna.
         """)
     
     st.markdown(f"""
-    **Možnost B (Brez avtomobila - Začasen preklop NGEN profila):**
+    **Možnost B (Brez avtomobila - Preklop profila):**
     * V NGEN aplikaciji vklopite profil: **Hiša ➔ Omrežje (8,9 kW) ➔ Baterija**.
-    * **OBVEZNO ob 14:00 preklopite nazaj** na: **Hiša ➔ Baterija ➔ Omrežje**, da popoldansko sonce baterijo mirno dopolni do 100 %.
+    * **OBVEZNO ob {sp_e_h:02d}:{sp_e_m:02d} preklopite nazaj** na: **Hiša ➔ Baterija ➔ Omrežje**, da se baterija v miru dopolni do 100 %.
     """)
 
-# 6. Simulacija pretokov za graf
+# 6. Priprava urnih podatkov za graf
 sim_export = []
 sim_soc = []
 curr_kwh_sim = BATTERY_CAPACITY_KWH * (soc_home / 100.0)
@@ -184,7 +208,7 @@ for h in range(24):
     sim_export.append(round(export_p, 1))
     sim_soc.append(round(min(100.0, (curr_kwh_sim / BATTERY_CAPACITY_KWH) * 100.0), 1))
 
-# 7. Grafični prikaz
+# 7. Grafi
 st.markdown("---")
 st.subheader("Potek moči in oddaje (Privzeti način)")
 

@@ -27,7 +27,6 @@ MONTHLY_FACTORS = {
     11: 0.98, 12: 0.95
 }
 
-# Slovenski časovni pas
 slo_tz = ZoneInfo("Europe/Ljubljana")
 now_slo = datetime.now(slo_tz)
 current_month = now_slo.month
@@ -65,18 +64,18 @@ def get_night_block_info(charge_date: date):
     return season_name, day_type, block
 
 st.title("☀️ NGEN Nadzornik Špic & EV")
-st.caption(f"v3.3: Fiksni hitrosti EV (6 kW / 11 kW) | Omrežnina | Meja soglasja: {GRID_LEGAL_LIMIT_KW} kW")
+st.caption(f"v3.4: Uradne omrežninske moči | Fiksni EV hitrosti | Meja soglasja: {GRID_LEGAL_LIMIT_KW} kW")
 
-# Nastavitve dogovorjenih moči (privzeto za 3x25A priključek)
+# Nastavitve dogovorjenih moči (točne uradne vrednosti iz portala Moj Elektro)
 with st.expander("⚙️ Dogovorjene obračunske moči (Moj Elektro)", expanded=False):
-    st.write("Vrednosti za vaše merilno mesto (3x25A). Algoritem jih samodejno uporabi:")
+    st.write("Uradne vrednosti za vaše merilno mesto (01.01.2026 - 31.12.2026):")
     col_p1, col_p2, col_p3 = st.columns(3)
-    p_b1 = col_p1.number_input("Blok 1 (kW)", value=5.5, step=0.1)
-    p_b2 = col_p2.number_input("Blok 2 (kW)", value=6.2, step=0.1)
-    p_b3 = col_p3.number_input("Blok 3 (kW)", value=7.0, step=0.1)
+    p_b1 = col_p1.number_input("Blok 1 (kW)", value=10.8, step=0.1)
+    p_b2 = col_p2.number_input("Blok 2 (kW)", value=13.3, step=0.1)
+    p_b3 = col_p3.number_input("Blok 3 (kW)", value=14.9, step=0.1)
     col_p4, col_p5, _ = st.columns(3)
-    p_b4 = col_p4.number_input("Blok 4 (kW)", value=7.5, step=0.1)
-    p_b5 = col_p5.number_input("Blok 5 (kW)", value=8.5, step=0.1)
+    p_b4 = col_p4.number_input("Blok 4 (kW)", value=15.0, step=0.1)
+    p_b5 = col_p5.number_input("Blok 5 (kW)", value=15.0, step=0.1)
 
 AGREED_POWERS = {1: p_b1, 2: p_b2, 3: p_b3, 4: p_b4, 5: p_b5}
 
@@ -222,7 +221,7 @@ else:
 # 6. NOČNI ASISTENT ZA POLNJENJE EV (FIKSNO 6 kW / 11 kW)
 # -------------------------------------------------------------
 st.markdown("---")
-st.subheader("3. 🌙 Nočni planer EV (Fiksni hitrosti)")
+st.subheader("3. 🌙 Nočni planer EV (Omrežnina & Hitrost)")
 
 tonight_date = now_slo.date()
 season_name, day_type, night_block = get_night_block_info(tonight_date)
@@ -232,14 +231,14 @@ HOUSE_NIGHT_RESERVE_KW = 0.6
 st.markdown(f"""
 * 📅 **Obdobje:** {season_name} ({tonight_date.strftime('%d. %m. %Y')})
 * 🏷️ **Dan:** {day_type} $\\rightarrow$ Nočni blok (22:00–06:00): **ČASOVNI BLOK {night_block}**
-* ⚡ **Vaša dogovorjena moč za Blok {night_block}:** **{auto_agreed_power:.1f} kW**
+* ⚡ **Uradna dogovorjena moč za Blok {night_block}:** **{auto_agreed_power:.1f} kW**
 """)
 
-# Izbira med dvema razpoložljivima hitrostma v vozilu
+# Privzeto izberemo 11 kW, saj je znotraj vaše 15 kW meje
 selected_speed_kw = st.radio(
     "Nastavitev moči polnjenja v avtomobilu / polnilnici:",
-    options=[6.0, 11.0],
-    format_func=lambda x: f"🔋 {int(x)} kW — {'Zmanjšana moč (Priporočeno za omrežnino)' if x == 6.0 else 'Polna moč (Hitro polnjenje)'}",
+    options=[11.0, 6.0],
+    format_func=lambda x: f"🚀 11 kW — Hitro polnjenje (Varno znotraj vaših {auto_agreed_power:.1f} kW)" if x == 11.0 else f"🔋 6 kW — Zmanjšana moč",
     horizontal=True
 )
 
@@ -256,26 +255,15 @@ else:
     total_night_load = selected_speed_kw + HOUSE_NIGHT_RESERVE_KW
 
     st.markdown(f"""
-    #### 📋 Načrt za izbrano nastavitev ({int(selected_speed_kw)} kW):
+    #### 📋 Načrt za nocoj ({int(selected_speed_kw)} kW):
     * **Čas polnjenja:** **22:00 – {end_h:02d}:{end_m:02d}** (trajanje: **{dur_h}h {dur_m}min**).
-    * **Skupna obremenitev (avto + hiša):** **{total_night_load:.1f} kW** (pri dogovorjeni moči **{auto_agreed_power:.1f} kW**).
+    * **Skupna obremenitev hiše:** **{total_night_load:.1f} kW** (na voljo imate **{auto_agreed_power:.1f} kW**).
     """)
 
-    if total_night_load > auto_agreed_power:
-        st.error(f"""
-        ⚠️ **PREKORAČITEV DOGOVORJENE MOČI za {total_night_load - auto_agreed_power:.1f} kW!**
-        * Polnih 11 kW skupaj s hišno porabo preseže dogovorjeno moč bloka {night_block} ({auto_agreed_power:.1f} kW).
-        * **Priporočilo:** Preklopite stikalo zgoraj na **6 kW**, da se izognete penalom na položnici!
-        """)
+    if total_night_load <= auto_agreed_power:
+        st.success(f"✅ **POPOLNOMA VARNO:** Obremenitev {total_night_load:.1f} kW je varno pod dogovorjeno mejo {auto_agreed_power:.1f} kW. Imate še {auto_agreed_power - total_night_load:.1f} kW rezerve.")
     else:
-        st.success(f"✅ **POPOLNOMA VARNO:** Skupna moč {total_night_load:.1f} kW je znotraj dogovorjene meje {auto_agreed_power:.1f} kW. Penali so 0 €.")
-
-    if charge_duration_h > 8.0:
-        st.warning(f"""
-        ⏰ **Polnjenje se podaljša čez 06:00 zjutraj!**
-        * Do 06:00 (v 8 urah) se bo nateklo **{selected_speed_kw * 8:.1f} kWh**.
-        * Ker se ob 06:00 začne dražji dnevni blok z nižjo močjo, je priporočljivo v avtu nastaviti zaključek ob 06:00.
-        """)
+        st.error(f"⚠️ Prekoračitev dogovorjene moči za {total_night_load - auto_agreed_power:.1f} kW!")
 
     st.warning(f"""
     🛑 **OPOZORILO ZA NGEN HRANILNIK:**
@@ -301,7 +289,7 @@ for h in range(24):
     surplus = max(0.0, pv_curve[h] - base_home_load)
     room = (BATTERY_CAPACITY_KWH - sim_kwh_loop) / BATTERY_EFFICIENCY
     
-    grid_p = min(surplus, custom_grid_kw)
+    grid_p = min(surplus, custom_grid_kw)https://github.com/slasko3a/solar-asistent/blob/main/solar_optimizer_v2.py
     left_b = surplus - grid_p
     
     if room > 0.05:

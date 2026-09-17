@@ -289,7 +289,7 @@ for h in range(24):
     surplus = max(0.0, pv_curve[h] - base_home_load)
     room = (BATTERY_CAPACITY_KWH - sim_kwh_loop) / BATTERY_EFFICIENCY
     
-    grid_p = min(surplus, custom_grid_kw)https://github.com/slasko3a/solar-asistent/blob/main/solar_optimizer_v2.py
+    grid_p = min(surplus, custom_grid_kw)
     left_b = surplus - grid_p
     
     if room > 0.05:

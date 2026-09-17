@@ -1,7 +1,7 @@
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from zoneinfo import ZoneInfo
 
 # Osnovna konfiguracija strani
@@ -65,7 +65,7 @@ def get_night_block_info(charge_date: date):
     return season_name, day_type, block
 
 st.title("☀️ NGEN Nadzornik Špic & EV")
-st.caption(f"v3.2: Avtomatska omrežnina & Nočni planer | Meja soglasja: {GRID_LEGAL_LIMIT_KW} kW")
+st.caption(f"v3.3: Fiksni hitrosti EV (6 kW / 11 kW) | Omrežnina | Meja soglasja: {GRID_LEGAL_LIMIT_KW} kW")
 
 # Nastavitve dogovorjenih moči (privzeto za 3x25A priključek)
 with st.expander("⚙️ Dogovorjene obračunske moči (Moj Elektro)", expanded=False):
@@ -165,7 +165,7 @@ custom_grid_kw = st.slider(
     max_value=8.9,
     value=7.0,
     step=0.5,
-    help="Moč, ki jo NGEN oddaja v omrežje pred polnjenjem baterije."
+    help="Moč, ki jo NGEN pošilja v omrežje pred polnjenjem baterije."
 )
 
 sim_t = start_time_float
@@ -219,21 +219,15 @@ else:
     st.success(f"✅ **ODLIČNA NASTAVITEV:** Oddaja varna ({max_grid_seen:.1f} kW), baterija bo dosegla 100 %.")
 
 # -------------------------------------------------------------
-# 6. SAMODEJNI NOČNI ASISTENT ZA POLNJENJE EV
+# 6. NOČNI ASISTENT ZA POLNJENJE EV (FIKSNO 6 kW / 11 kW)
 # -------------------------------------------------------------
 st.markdown("---")
-st.subheader("3. 🌙 Samodejni nočni planer EV (Nova omrežnina)")
+st.subheader("3. 🌙 Nočni planer EV (Fiksni hitrosti)")
 
-# Določitev današnjega nočnega bloka ob 22:00
 tonight_date = now_slo.date()
 season_name, day_type, night_block = get_night_block_info(tonight_date)
 auto_agreed_power = AGREED_POWERS[night_block]
-
-# Rezerva za hišo ponoči (hladilniki, toplotna črpalka...)
 HOUSE_NIGHT_RESERVE_KW = 0.6
-safe_ev_power_calc = max(2.0, min(11.0, auto_agreed_power - HOUSE_NIGHT_RESERVE_KW))
-# 3-fazni tok (Amperi): P = 3 * 230V * I
-auto_amps = round(safe_ev_power_calc / (3 * 0.230))
 
 st.markdown(f"""
 * 📅 **Obdobje:** {season_name} ({tonight_date.strftime('%d. %m. %Y')})
@@ -241,34 +235,51 @@ st.markdown(f"""
 * ⚡ **Vaša dogovorjena moč za Blok {night_block}:** **{auto_agreed_power:.1f} kW**
 """)
 
+# Izbira med dvema razpoložljivima hitrostma v vozilu
+selected_speed_kw = st.radio(
+    "Nastavitev moči polnjenja v avtomobilu / polnilnici:",
+    options=[6.0, 11.0],
+    format_func=lambda x: f"🔋 {int(x)} kW — {'Zmanjšana moč (Priporočeno za omrežnino)' if x == 6.0 else 'Polna moč (Hitro polnjenje)'}",
+    horizontal=True
+)
+
 if ev_kwh_needed <= 0.5:
     st.info("🚗 Baterija avtomobila je že na želeni ravni. Nočno polnjenje ni potrebno.")
 else:
-    charge_duration_h = ev_kwh_needed / safe_ev_power_calc
+    charge_duration_h = ev_kwh_needed / selected_speed_kw
     dur_h = int(charge_duration_h)
     dur_m = int((charge_duration_h % 1) * 60)
     
     end_time_raw = 22.0 + charge_duration_h
     end_h = int(end_time_raw % 24)
     end_m = int((end_time_raw % 1) * 60)
+    total_night_load = selected_speed_kw + HOUSE_NIGHT_RESERVE_KW
 
-    st.success(f"""
-    #### 📋 Samodejno optimiziran načrt za nocoj:
-    * **Priporočena moč polnjenja:** **{safe_ev_power_calc:.1f} kW** (nastavitev v avtu: **{auto_amps} A** na 3 faze).
+    st.markdown(f"""
+    #### 📋 Načrt za izbrano nastavitev ({int(selected_speed_kw)} kW):
     * **Čas polnjenja:** **22:00 – {end_h:02d}:{end_m:02d}** (trajanje: **{dur_h}h {dur_m}min**).
-    * **Varnost omrežnine:** Skupna moč s hišo bo znašala **{safe_ev_power_calc + HOUSE_NIGHT_RESERVE_KW:.1f} kW**, kar natančno ustreza vaši dogovorjeni moči **{auto_agreed_power:.1f} kW** (brez plačila penalov!).
+    * **Skupna obremenitev (avto + hiša):** **{total_night_load:.1f} kW** (pri dogovorjeni moči **{auto_agreed_power:.1f} kW**).
     """)
 
-    if charge_duration_h > 8.0:
+    if total_night_load > auto_agreed_power:
         st.error(f"""
-        ⚠️ **Pozor:** Polnjenje bi se podaljšalo čez **06:00 zjutraj**! 
-        Ob 06:00 zjutraj nastopi dražji dnevni blok z nižjo dogovorjeno močjo. 
-        Priporočilo: Napolnite do 06:00 (največ {safe_ev_power_calc * 8:.1f} kWh), ostanek pa dopolnite naslednjo noč.
+        ⚠️ **PREKORAČITEV DOGOVORJENE MOČI za {total_night_load - auto_agreed_power:.1f} kW!**
+        * Polnih 11 kW skupaj s hišno porabo preseže dogovorjeno moč bloka {night_block} ({auto_agreed_power:.1f} kW).
+        * **Priporočilo:** Preklopite stikalo zgoraj na **6 kW**, da se izognete penalom na položnici!
+        """)
+    else:
+        st.success(f"✅ **POPOLNOMA VARNO:** Skupna moč {total_night_load:.1f} kW je znotraj dogovorjene meje {auto_agreed_power:.1f} kW. Penali so 0 €.")
+
+    if charge_duration_h > 8.0:
+        st.warning(f"""
+        ⏰ **Polnjenje se podaljša čez 06:00 zjutraj!**
+        * Do 06:00 (v 8 urah) se bo nateklo **{selected_speed_kw * 8:.1f} kWh**.
+        * Ker se ob 06:00 začne dražji dnevni blok z nižjo močjo, je priporočljivo v avtu nastaviti zaključek ob 06:00.
         """)
 
     st.warning(f"""
     🛑 **OPOZORILO ZA NGEN HRANILNIK:**
-    Pred spanjem v NGEN aplikaciji pod *Nastavitve hranilnika* nastavite minimalno raven (**Min SoC**) na npr. **80 % ali 90 %** (ali začasno onemogočite nočno praznjenje), da avto ne bo praznil hišne baterije!
+    Pred spanjem v NGEN aplikaciji pod *Nastavitve hranilnika* nastavite minimalno raven (**Min SoC**) na npr. **80 % ali 90 %**, da avto ne bo praznil hišne baterije!
     """)
 
 # -------------------------------------------------------------
